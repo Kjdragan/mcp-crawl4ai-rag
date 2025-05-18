@@ -5,17 +5,9 @@ description = "MCP server for integrating web crawling and RAG into AI agents an
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "crawl4ai",
+    "crawl4ai",            # Fetch latest version
     "mcp",
-    "google-adk",
     "supabase",
     "openai",
-    "dotenv",
-    "google-adk>=0.4.0",
-    "fastapi>=0.109.0",
-    "uvicorn>=0.27.0",
-    "httpx>=0.26.0",
-    "requests>=2.31.0",
-    "pydantic>=2.5.0",
-    "google-cloud-aiplatform>=1.35.0",
+    "dotenv"
 ]
