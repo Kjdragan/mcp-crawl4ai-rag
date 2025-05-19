@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import traceback
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
@@ -437,6 +438,22 @@ async def smart_crawl_url(ctx: Context, url_or_path: str, max_depth: int = 3, ma
         url_to_full_document_map: Dict[str, str] = {}
 
         if is_file_path(url_or_path):
+            # Check if this looks like a host path (typically starts with C:/ or similar)
+            is_host_path = False
+            if sys.platform == 'win32' and ':' in url_or_path:
+                is_host_path = True
+            elif url_or_path.startswith('/') and not url_or_path.startswith('/app/'):
+                is_host_path = True
+                
+            if is_host_path:
+                # This is likely a host path that the container cannot access directly
+                return json.dumps({
+                    "success": False,
+                    "url_or_path": url_or_path,
+                    "error": "This appears to be a host file path that cannot be accessed directly from the container. "
+                            "Please use the 'crawl_local_file' tool with base64-encoded content instead."
+                }, indent=2)
+                
             if url_or_path.lower().endswith('.md'):
                 content = process_markdown_file(url_or_path)
                 if not content or not content.strip():
@@ -661,8 +678,8 @@ async def crawl_local_file(ctx: Context, file_content: str, filename: str, chunk
     
     Args:
         ctx: The MCP server provided context
-        file_content: Base64-encoded content of the markdown file
-        filename: Name of the file (will be used as source name)
+        file_content: Base64-encoded content of the file
+        filename: Name of the file for identification (e.g., 'document.md')
         chunk_size: Size of chunks for processing (default: 5000)
         
     Returns:
@@ -672,103 +689,76 @@ async def crawl_local_file(ctx: Context, file_content: str, filename: str, chunk
         # Get the Supabase client from the context
         supabase_client = ctx.request_context.lifespan_context.supabase_client
         
-        # Decode the base64 content
-        import base64
+        # Normalize the filename for source name extraction
+        normalized_filename = os.path.basename(filename)
+        
+        # Decode base64 content
         try:
+            import base64
             decoded_content = base64.b64decode(file_content).decode('utf-8')
         except Exception as e:
             return json.dumps({
                 "success": False,
+                "filename": normalized_filename,
                 "error": f"Error decoding file content: {str(e)}"
             }, indent=2)
         
-        # Create a temporary file
-        import tempfile
-        import os
+        # Extract source name from the filename (without extension)
+        source_name = normalized_filename
+        if source_name.lower().endswith('.md'):
+            source_name = source_name[:-3]
+            
+        # Chunk the decoded content
+        chunks = smart_chunk_markdown(decoded_content, chunk_size=chunk_size)
         
-        try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as temp_file:
-                temp_file.write(decoded_content)
-                temp_path = temp_file.name
+        # Prepare data for Supabase
+        urls = []
+        chunk_numbers = []
+        contents = []
+        metadatas = []
+        
+        for i, chunk_content in enumerate(chunks):
+            urls.append(filename)
+            chunk_numbers.append(i)
+            contents.append(chunk_content)
             
-            # Extract source name from the filename (without extension)
-            source_name = os.path.basename(filename)
-            if source_name.lower().endswith('.md'):
-                source_name = source_name[:-3]
-            
-            # Chunk the content
-            chunks = smart_chunk_markdown(decoded_content, chunk_size=chunk_size)
-            
-            # Prepare data for Supabase
-            urls = []
-            chunk_numbers = []
-            contents = []
-            metadatas = []
-            
-            for i, chunk_content in enumerate(chunks):
-                urls.append(filename)
-                chunk_numbers.append(i)
-                contents.append(chunk_content)
-                
-                # Extract metadata
-                meta = extract_section_info(chunk_content)
-                meta["chunk_index"] = i
-                meta["file_path"] = filename
-                meta["source"] = source_name
-                meta["crawl_type"] = "local_file"
-                metadatas.append(meta)
-            
-            # Create url_to_full_document mapping
-            url_to_full_document = {filename: decoded_content}
-            
-            # Add to Supabase
-            add_documents_to_supabase(
-                supabase_client, 
-                urls, 
-                chunk_numbers, 
-                contents, 
-                metadatas, 
-                url_to_full_document
-            )
-            
-            return json.dumps({
-                "success": True,
-                "file_path": filename,
-                "chunks_processed": len(chunks),
-                "source_name": source_name
-            }, indent=2)
-            
-        finally:
-            # Clean up the temporary file if it exists
-            if 'temp_path' in locals():
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-    
-            doc_urls_for_supabase,
-            chunk_indices_for_supabase,
-            final_chunks_to_store,
-            final_metadatas_to_store,
-            url_to_full_document_map
+            # Extract metadata
+            meta = extract_section_info(chunk_content)
+            meta["chunk_index"] = i
+            meta["file_path"] = filename
+            meta["source"] = source_name
+            meta["crawl_type"] = "local_file"
+            metadatas.append(meta)
+        
+        # Create url_to_full_document mapping
+        url_to_full_document = {filename: decoded_content}
+        
+        # Add to Supabase
+        add_documents_to_supabase(
+            supabase_client, 
+            urls, 
+            chunk_numbers, 
+            contents, 
+            metadatas, 
+            url_to_full_document
         )
-
+        
         return json.dumps({
             "success": True,
-            "file_path": normalized_abs_path,
-            "chunks_processed": len(final_chunks_to_store),
+            "filename": filename,
+            "chunks_processed": len(chunks),
             "source_name": source_name
         }, indent=2)
-
+    
     except Exception as e:
-        traceback.print_exc() # For server-side debugging
+        traceback.print_exc()  # For server-side debugging
         return json.dumps({
             "success": False,
-            "file_path": file_path,
-            "error": f"Error processing local markdown file: {str(e)}"
+            "filename": filename,
+            "error": f"Error processing file: {str(e)}"
         }, indent=2)
 
-@mcp.tool()
+@mcp.tool(name="get_available_sources")
 async def get_available_sources(ctx: Context) -> str:
     """
     Get all available sources based on unique source metadata values.
