@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import re
+import traceback
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 from utils import get_supabase_client, add_documents_to_supabase, search_documents
@@ -30,7 +31,205 @@ dotenv_path = project_root / '.env'
 # Force override of existing environment variables
 load_dotenv(dotenv_path, override=True)
 
-# Create a dataclass for our application context
+# Helper functions for local file processing
+def normalize_file_path(path: str) -> str:
+    """
+    Normalize a file path for consistent handling across platforms.
+
+    Args:
+        path: File path to normalize
+
+    Returns:
+        Normalized file path
+    """
+    # Convert backslashes to forward slashes
+    normalized_path = path.replace('\\', '/')
+
+    # Handle spaces in the path if needed
+    if ' ' in normalized_path:
+        # On Windows, this isn't strictly necessary as Windows handles spaces in paths well
+        # But it might be needed for certain operations
+        pass
+
+    return normalized_path
+
+def is_file_path(path: str) -> bool:
+    """
+    Check if the given string represents a local file path.
+
+    Args:
+        path: String to check
+
+    Returns:
+        True if it appears to be a file path, False otherwise
+    """
+    try:
+        # Normalize the path first
+        norm_path = normalize_file_path(path)
+
+        # Print debug information
+        # print(f"Checking if path exists: {path}")
+        # print(f"Normalized path: {norm_path}")
+
+        # Check for absolute path patterns
+        if os.path.isabs(norm_path):
+            # print(f"Path is absolute: {norm_path}")
+            if os.path.exists(norm_path):
+                # print(f"Path exists: {norm_path}")
+                return True
+            # else:
+                # print(f"Path does not exist: {norm_path}")
+
+        # Try the original path as a fallback
+        if os.path.isabs(path):
+            # print(f"Original path is absolute: {path}")
+            if os.path.exists(path):
+                # print(f"Original path exists: {path}")
+                return True
+            # else:
+                # print(f"Original path does not exist: {path}")
+
+        # Simple check for relative paths that exist
+        if os.path.exists(norm_path):
+            # print(f"Normalized relative path exists: {norm_path}")
+            return True
+        if os.path.exists(path):
+            # print(f"Original relative path exists: {path}")
+            return True
+
+        # Additional check for Windows paths with spaces
+        if '\\' in path or '/' in path:
+            # Looks like a path based on separators
+            if path.lower().endswith('.md'):
+                # print(f"Path looks like a file path with .md extension: {path}")
+                return True
+
+        return False
+    except Exception as e:
+        # print(f"Error checking if path exists: {e}")
+        return False
+
+def process_markdown_file(file_path: str) -> str:
+    """
+    Process a markdown file and return its content with consistent line endings.
+
+    Args:
+        file_path: Path to the markdown file
+
+    Returns:
+        str: Processed markdown content with consistent line endings
+    """
+    # First try with the normalized path
+    norm_path = normalize_file_path(file_path)
+
+    # Try different paths and encodings
+    paths_to_try = [
+        (norm_path, 'utf-8'),
+        (file_path, 'utf-8'),
+        (norm_path, 'latin-1'),
+        (file_path, 'latin-1'),
+        (norm_path, 'utf-16'),
+        (file_path, 'utf-16'),
+        (norm_path, 'cp1252'),
+        (file_path, 'cp1252')
+    ]
+
+    # print(f"Attempting to read file: {file_path}")
+    # print(f"Normalized path: {norm_path}")
+
+    for path_to_try, encoding in paths_to_try:
+        try:
+            # print(f"Trying to read with path: {path_to_try}, encoding: {encoding}")
+            if not os.path.exists(path_to_try):
+                # print(f"Path does not exist: {path_to_try}")
+                continue
+
+            with open(path_to_try, 'r', encoding=encoding) as f:
+                content = f.read()
+                if not content.strip():
+                    # print(f"File is empty or contains only whitespace: {path_to_try}")
+                    continue
+
+                # print(f"Successfully read file with encoding {encoding}: {path_to_try}")
+                # Normalize line endings and remove any trailing whitespace
+                return '\n'.join(line.rstrip() for line in content.splitlines())
+        except FileNotFoundError:
+            # print(f"File not found: {path_to_try}")
+            continue
+        except UnicodeDecodeError:
+            # print(f"Unicode decode error with encoding {encoding}: {path_to_try}")
+            continue
+        except Exception as e:
+            print(f"Error reading file {path_to_try}: {e}", file=sys.stderr)
+            continue
+
+    print(f"Failed to read file with any method: {file_path}", file=sys.stderr)
+    return ""
+
+def smart_chunk_markdown(text: str, chunk_size: int = 5000) -> List[str]:
+    """Split text into chunks, respecting code blocks and paragraphs."""
+    chunks = []
+    start = 0
+    text_length = len(text)
+
+    while start < text_length:
+        # Calculate end position
+        end = start + chunk_size
+
+        # If we're at the end of the text, just take what's left
+        if end >= text_length:
+            chunks.append(text[start:].strip())
+            break
+
+        # Try to find a code block boundary first (```)
+        chunk = text[start:end]
+        code_block = chunk.rfind('```')
+        if code_block != -1 and code_block > chunk_size * 0.3:
+            end = start + code_block
+
+        # If no code block, try to break at a paragraph
+        elif '\n\n' in chunk:
+            # Find the last paragraph break
+            last_break = chunk.rfind('\n\n')
+            if last_break > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
+                end = start + last_break
+
+        # If no paragraph break, try to break at a sentence
+        elif '. ' in chunk:
+            # Find the last sentence break
+            last_period = chunk.rfind('. ')
+            if last_period > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
+                end = start + last_period + 1
+
+        # Extract chunk and clean it up
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        # Move start position for next chunk
+        start = end
+
+    return chunks
+
+def extract_section_info(chunk: str) -> Dict[str, Any]:
+    """
+    Extracts headers and stats from a chunk.
+    
+    Args:
+        chunk: Markdown chunk
+        
+    Returns:
+        Dictionary with headers and stats
+    """
+    headers = re.findall(r'^(#+)\s+(.+)$', chunk, re.MULTILINE)
+    header_str = '; '.join([f'{h[0]} {h[1]}' for h in headers]) if headers else ''
+
+    return {
+        "headers": header_str,
+        "char_count": len(chunk),
+        "word_count": len(chunk.split())
+    }
+
 @dataclass
 class Crawl4AIContext:
     """Context for the Crawl4AI MCP server."""
@@ -125,70 +324,6 @@ def parse_sitemap(sitemap_url: str) -> List[str]:
 
     return urls
 
-def smart_chunk_markdown(text: str, chunk_size: int = 5000) -> List[str]:
-    """Split text into chunks, respecting code blocks and paragraphs."""
-    chunks = []
-    start = 0
-    text_length = len(text)
-
-    while start < text_length:
-        # Calculate end position
-        end = start + chunk_size
-
-        # If we're at the end of the text, just take what's left
-        if end >= text_length:
-            chunks.append(text[start:].strip())
-            break
-
-        # Try to find a code block boundary first (```)
-        chunk = text[start:end]
-        code_block = chunk.rfind('```')
-        if code_block != -1 and code_block > chunk_size * 0.3:
-            end = start + code_block
-
-        # If no code block, try to break at a paragraph
-        elif '\n\n' in chunk:
-            # Find the last paragraph break
-            last_break = chunk.rfind('\n\n')
-            if last_break > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
-                end = start + last_break
-
-        # If no paragraph break, try to break at a sentence
-        elif '. ' in chunk:
-            # Find the last sentence break
-            last_period = chunk.rfind('. ')
-            if last_period > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
-                end = start + last_period + 1
-
-        # Extract chunk and clean it up
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-
-        # Move start position for next chunk
-        start = end
-
-    return chunks
-
-def extract_section_info(chunk: str) -> Dict[str, Any]:
-    """
-    Extracts headers and stats from a chunk.
-
-    Args:
-        chunk: Markdown chunk
-
-    Returns:
-        Dictionary with headers and stats
-    """
-    headers = re.findall(r'^(#+)\s+(.+)$', chunk, re.MULTILINE)
-    header_str = '; '.join([f'{h[0]} {h[1]}' for h in headers]) if headers else ''
-
-    return {
-        "headers": header_str,
-        "char_count": len(chunk),
-        "word_count": len(chunk.split())
-    }
-
 @mcp.tool()
 async def crawl_single_page(ctx: Context, url: str) -> str:
     """
@@ -268,113 +403,158 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         }, indent=2)
 
 @mcp.tool()
-async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
+async def smart_crawl_url(ctx: Context, url_or_path: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
     """
-    Intelligently crawl a URL based on its type and store content in Supabase.
+    Intelligently process a URL or file path and store content in Supabase.
 
-    This tool automatically detects the URL type and applies the appropriate crawling method:
+    This tool automatically detects the input type and applies the appropriate method:
+    - For local file paths: Directly reads and processes the file (currently supports .md files)
     - For sitemaps: Extracts and crawls all URLs in parallel
     - For text files (llms.txt): Directly retrieves the content
     - For regular webpages: Recursively crawls internal links up to the specified depth
 
-    All crawled content is chunked and stored in Supabase for later retrieval and querying.
+    All content is chunked and stored in Supabase for later retrieval and querying.
 
     Args:
         ctx: The MCP server provided context
-        url: URL to crawl (can be a regular webpage, sitemap.xml, or .txt file)
+        url_or_path: URL or local file path to process
         max_depth: Maximum recursion depth for regular URLs (default: 3)
         max_concurrent: Maximum number of concurrent browser sessions (default: 10)
-        chunk_size: Maximum size of each content chunk in characters (default: 1000)
+        chunk_size: Maximum size of each content chunk in characters (default: 5000)
 
     Returns:
-        JSON string with crawl summary and storage information
+        JSON string with processing summary and storage information
     """
     try:
-        # Get the crawler and Supabase client from the context
         crawler = ctx.request_context.lifespan_context.crawler
         supabase_client = ctx.request_context.lifespan_context.supabase_client
 
-        crawl_results = []
-        crawl_type = "webpage"
+        final_chunks_to_store: List[str] = []
+        final_metadatas_to_store: List[Dict[str, Any]] = []
+        processed_items_info_list: List[str] = []
+        processed_items_count = 0
+        crawl_type_summary = "unknown"
+        url_to_full_document_map: Dict[str, str] = {}
 
-        # Detect URL type and use appropriate crawl method
-        if is_txt(url):
-            # For text files, use simple crawl
-            crawl_results = await crawl_markdown_file(crawler, url)
-            crawl_type = "text_file"
-        elif is_sitemap(url):
-            # For sitemaps, extract URLs and crawl in parallel
-            sitemap_urls = parse_sitemap(url)
-            if not sitemap_urls:
+        if is_file_path(url_or_path):
+            if url_or_path.lower().endswith('.md'):
+                content = process_markdown_file(url_or_path)
+                if not content or not content.strip():
+                    return json.dumps({
+                        "success": False,
+                        "url_or_path": url_or_path,
+                        "error": "File is empty or could not be read"
+                    }, indent=2)
+
+                abs_path = os.path.abspath(url_or_path)
+                normalized_abs_path = abs_path.replace('\\', '/')
+                file_url = f"file://{normalized_abs_path}"
+                filename = os.path.basename(abs_path)
+                source_name = os.path.splitext(filename)[0]
+                crawl_type_summary = "local_markdown"
+
+                url_to_full_document_map[file_url] = content
+
+                markdown_chunks = smart_chunk_markdown(content, chunk_size=chunk_size)
+                for i, chunk_md in enumerate(markdown_chunks):
+                    meta = extract_section_info(chunk_md)
+                    meta.update({
+                        'chunk_index': i,
+                        'source': source_name,
+                        'filename': filename,
+                        'doc_type': 'markdown',
+                        'local_file': True,
+                        'file_path': normalized_abs_path,
+                        'crawl_type': crawl_type_summary,
+                        'url': file_url
+                    })
+                    final_chunks_to_store.append(chunk_md)
+                    final_metadatas_to_store.append(meta)
+                
+                processed_items_info_list.append(file_url)
+                processed_items_count = 1
+            else:
                 return json.dumps({
                     "success": False,
-                    "url": url,
-                    "error": "No URLs found in sitemap"
+                    "url_or_path": url_or_path,
+                    "error": "Only .md files are supported for local file paths"
                 }, indent=2)
-            crawl_results = await crawl_batch(crawler, sitemap_urls, max_concurrent=max_concurrent)
-            crawl_type = "sitemap"
-        else:
-            # For regular URLs, use recursive crawl
-            crawl_results = await crawl_recursive_internal_links(crawler, [url], max_depth=max_depth, max_concurrent=max_concurrent)
-            crawl_type = "webpage"
+        else: # It's a URL
+            web_crawl_results: List[Dict[str, Any]] = []
+            if is_txt(url_or_path):
+                web_crawl_results = await crawl_markdown_file(crawler, url_or_path)
+                crawl_type_summary = "text_file"
+            elif is_sitemap(url_or_path):
+                sitemap_urls = parse_sitemap(url_or_path)
+                if not sitemap_urls:
+                    return json.dumps({"success": False, "url_or_path": url_or_path, "error": "No URLs found in sitemap"}, indent=2)
+                web_crawl_results = await crawl_batch(crawler, sitemap_urls, max_concurrent=max_concurrent)
+                crawl_type_summary = "sitemap"
+            else:
+                web_crawl_results = await crawl_recursive_internal_links(crawler, [url_or_path], max_depth=max_depth, max_concurrent=max_concurrent)
+                crawl_type_summary = "webpage"
 
-        if not crawl_results:
+            if not web_crawl_results:
+                return json.dumps({"success": False, "url_or_path": url_or_path, "error": "No content found from URL"}, indent=2)
+
+            for doc_content in web_crawl_results:
+                source_url = doc_content['url']
+                markdown_content = doc_content['markdown']
+                page_metadata = doc_content.get('metadata', {})
+
+                url_to_full_document_map[source_url] = markdown_content
+
+                markdown_chunks = smart_chunk_markdown(markdown_content, chunk_size=chunk_size)
+                for i, chunk_md in enumerate(markdown_chunks):
+                    meta = extract_section_info(chunk_md)
+                    meta.update({
+                        'chunk_index': i,
+                        'source': urlparse(source_url).netloc,
+                        'url': source_url,
+                        'doc_type': 'web_markdown', # Content from web, processed into markdown
+                        'local_file': False,
+                        'crawl_type': crawl_type_summary,
+                        'page_title': page_metadata.get('title', page_metadata.get('Title', '')) # Accommodate different casings for title
+                    })
+                    final_chunks_to_store.append(chunk_md)
+                    final_metadatas_to_store.append(meta)
+            
+            processed_items_info_list = [doc['url'] for doc in web_crawl_results]
+            processed_items_count = len(web_crawl_results)
+
+        if not final_chunks_to_store:
             return json.dumps({
                 "success": False,
-                "url": url,
-                "error": "No content found"
+                "url_or_path": url_or_path,
+                "error": "No content chunks to process"
             }, indent=2)
 
-        # Process results and store in Supabase
-        urls = []
-        chunk_numbers = []
-        contents = []
-        metadatas = []
-        chunk_count = 0
+        # Prepare arguments for add_documents_to_supabase
+        doc_urls_for_supabase = [meta['url'] for meta in final_metadatas_to_store]
+        chunk_indices_for_supabase = [meta['chunk_index'] for meta in final_metadatas_to_store]
 
-        for doc in crawl_results:
-            source_url = doc['url']
-            md = doc['markdown']
-            chunks = smart_chunk_markdown(md, chunk_size=chunk_size)
-
-            for i, chunk in enumerate(chunks):
-                urls.append(source_url)
-                chunk_numbers.append(i)
-                contents.append(chunk)
-
-                # Extract metadata
-                meta = extract_section_info(chunk)
-                meta["chunk_index"] = i
-                meta["url"] = source_url
-                meta["source"] = urlparse(source_url).netloc
-                meta["crawl_type"] = crawl_type
-                meta["crawl_time"] = str(asyncio.current_task().get_coro().__name__)
-                metadatas.append(meta)
-
-                chunk_count += 1
-
-        # Create url_to_full_document mapping
-        url_to_full_document = {}
-        for doc in crawl_results:
-            url_to_full_document[doc['url']] = doc['markdown']
-
-        # Add to Supabase
-        # IMPORTANT: Adjust this batch size for more speed if you want! Just don't overwhelm your system or the embedding API ;)
-        batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+        add_documents_to_supabase(
+            supabase_client, 
+            doc_urls_for_supabase, 
+            chunk_indices_for_supabase, 
+            final_chunks_to_store, 
+            final_metadatas_to_store, 
+            url_to_full_document_map
+        )
 
         return json.dumps({
             "success": True,
-            "url": url,
-            "crawl_type": crawl_type,
-            "pages_crawled": len(crawl_results),
-            "chunks_stored": chunk_count,
-            "urls_crawled": [doc['url'] for doc in crawl_results][:5] + (["..."] if len(crawl_results) > 5 else [])
+            "url_or_path": url_or_path,
+            "crawl_type": crawl_type_summary,
+            "pages_crawled": processed_items_count, 
+            "chunks_stored": len(final_chunks_to_store),
+            "urls_crawled": processed_items_info_list[:5] + (["..."] if len(processed_items_info_list) > 5 else []) 
         }, indent=2)
     except Exception as e:
+        traceback.print_exc() # For server-side debugging
         return json.dumps({
             "success": False,
-            "url": url,
+            "url_or_path": url_or_path,
             "error": str(e)
         }, indent=2)
 
@@ -470,6 +650,115 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
         current_urls = next_level_urls
 
     return results_all
+
+@mcp.tool(name="process_local_markdown")
+async def process_local_markdown(ctx: Context, file_path: str, chunk_size: int = 5000) -> str:
+    """
+    Process a local markdown file and add its content to the RAG system.
+
+    This tool reads a local markdown file, splits it into manageable chunks, 
+    and stores these chunks along with their metadata in the Supabase database 
+    for later retrieval and querying in a RAG (Retrieval Augmented Generation) setup.
+
+    Args:
+        ctx: The MCP server provided context, used to access shared resources like the Supabase client.
+        file_path: The absolute or relative path to the local markdown (.md) file to be processed.
+        chunk_size: The target maximum size (in characters) for each chunk of content. 
+                    The actual chunk size may vary slightly to respect markdown structures (default: 5000).
+
+    Returns:
+        A JSON string summarizing the outcome of the processing. This includes:
+        - "success": Boolean indicating if the operation was successful.
+        - "file_path": The normalized absolute path of the processed file.
+        - "chunks_processed": The number of content chunks stored in Supabase.
+        - "source_name": The name of the source, derived from the filename.
+        - "error": A message describing any error that occurred (if success is false).
+    """
+    try:
+        supabase_client = ctx.request_context.lifespan_context.supabase_client
+
+        if not os.path.exists(file_path):
+            return json.dumps({
+                "success": False,
+                "file_path": file_path,
+                "error": "File not found"
+            }, indent=2)
+
+        if not file_path.lower().endswith('.md'):
+            return json.dumps({
+                "success": False,
+                "file_path": file_path,
+                "error": "Only .md files are supported"
+            }, indent=2)
+
+        content = process_markdown_file(file_path)
+        if not content or not content.strip():
+            return json.dumps({
+                "success": False,
+                "file_path": file_path,
+                "error": "File is empty or could not be read"
+            }, indent=2)
+
+        abs_path = os.path.abspath(file_path)
+        normalized_abs_path = abs_path.replace('\\', '/')
+        file_url = f"file://{normalized_abs_path}"
+        filename = os.path.basename(abs_path)
+        source_name = os.path.splitext(filename)[0]
+
+        markdown_chunks = smart_chunk_markdown(content, chunk_size=chunk_size)
+
+        final_chunks_to_store: List[str] = []
+        final_metadatas_to_store: List[Dict[str, Any]] = []
+        url_to_full_document_map: Dict[str, str] = {file_url: content}
+
+        for i, chunk_md in enumerate(markdown_chunks):
+            meta = extract_section_info(chunk_md)
+            meta.update({
+                'chunk_index': i,
+                'source': source_name,
+                'filename': filename,
+                'doc_type': 'markdown',        # Explicitly 'markdown' for local files
+                'local_file': True,
+                'file_path': normalized_abs_path,
+                'crawl_type': 'local_markdown_tool', # To distinguish if needed
+                'url': file_url
+            })
+            final_chunks_to_store.append(chunk_md)
+            final_metadatas_to_store.append(meta)
+
+        if not final_chunks_to_store:
+            return json.dumps({
+                "success": False,
+                "file_path": file_path,
+                "error": "No content chunks generated from file"
+            }, indent=2)
+
+        doc_urls_for_supabase = [meta['url'] for meta in final_metadatas_to_store]
+        chunk_indices_for_supabase = [meta['chunk_index'] for meta in final_metadatas_to_store]
+
+        add_documents_to_supabase(
+            supabase_client,
+            doc_urls_for_supabase,
+            chunk_indices_for_supabase,
+            final_chunks_to_store,
+            final_metadatas_to_store,
+            url_to_full_document_map
+        )
+
+        return json.dumps({
+            "success": True,
+            "file_path": normalized_abs_path,
+            "chunks_processed": len(final_chunks_to_store),
+            "source_name": source_name
+        }, indent=2)
+
+    except Exception as e:
+        traceback.print_exc() # For server-side debugging
+        return json.dumps({
+            "success": False,
+            "file_path": file_path,
+            "error": f"Error processing local markdown file: {str(e)}"
+        }, indent=2)
 
 @mcp.tool()
 async def get_available_sources(ctx: Context) -> str:
