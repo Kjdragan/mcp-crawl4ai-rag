@@ -651,93 +651,101 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
 
     return results_all
 
-@mcp.tool(name="process_local_markdown")
-async def process_local_markdown(ctx: Context, file_path: str, chunk_size: int = 5000) -> str:
+@mcp.tool(name="crawl_local_file")
+async def crawl_local_file(ctx: Context, file_content: str, filename: str, chunk_size: int = 5000) -> str:
     """
-    Process a local markdown file and add its content to the RAG system.
-
-    This tool reads a local markdown file, splits it into manageable chunks, 
-    and stores these chunks along with their metadata in the Supabase database 
-    for later retrieval and querying in a RAG (Retrieval Augmented Generation) setup.
-
+    Crawl and process a local markdown file from the host machine.
+    
+    This tool reads a markdown file from the host machine, processes its content,
+    and adds it to the RAG system for later querying.
+    
     Args:
-        ctx: The MCP server provided context, used to access shared resources like the Supabase client.
-        file_path: The absolute or relative path to the local markdown (.md) file to be processed.
-        chunk_size: The target maximum size (in characters) for each chunk of content. 
-                    The actual chunk size may vary slightly to respect markdown structures (default: 5000).
-
+        ctx: The MCP server provided context
+        file_content: Base64-encoded content of the markdown file
+        filename: Name of the file (will be used as source name)
+        chunk_size: Size of chunks for processing (default: 5000)
+        
     Returns:
-        A JSON string summarizing the outcome of the processing. This includes:
-        - "success": Boolean indicating if the operation was successful.
-        - "file_path": The normalized absolute path of the processed file.
-        - "chunks_processed": The number of content chunks stored in Supabase.
-        - "source_name": The name of the source, derived from the filename.
-        - "error": A message describing any error that occurred (if success is false).
+        JSON string with processing results
     """
     try:
+        # Get the Supabase client from the context
         supabase_client = ctx.request_context.lifespan_context.supabase_client
-
-        if not os.path.exists(file_path):
+        
+        # Decode the base64 content
+        import base64
+        try:
+            decoded_content = base64.b64decode(file_content).decode('utf-8')
+        except Exception as e:
             return json.dumps({
                 "success": False,
-                "file_path": file_path,
-                "error": "File not found"
+                "error": f"Error decoding file content: {str(e)}"
             }, indent=2)
-
-        if not file_path.lower().endswith('.md'):
+        
+        # Create a temporary file
+        import tempfile
+        import os
+        
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as temp_file:
+                temp_file.write(decoded_content)
+                temp_path = temp_file.name
+            
+            # Extract source name from the filename (without extension)
+            source_name = os.path.basename(filename)
+            if source_name.lower().endswith('.md'):
+                source_name = source_name[:-3]
+            
+            # Chunk the content
+            chunks = smart_chunk_markdown(decoded_content, chunk_size=chunk_size)
+            
+            # Prepare data for Supabase
+            urls = []
+            chunk_numbers = []
+            contents = []
+            metadatas = []
+            
+            for i, chunk_content in enumerate(chunks):
+                urls.append(filename)
+                chunk_numbers.append(i)
+                contents.append(chunk_content)
+                
+                # Extract metadata
+                meta = extract_section_info(chunk_content)
+                meta["chunk_index"] = i
+                meta["file_path"] = filename
+                meta["source"] = source_name
+                meta["crawl_type"] = "local_file"
+                metadatas.append(meta)
+            
+            # Create url_to_full_document mapping
+            url_to_full_document = {filename: decoded_content}
+            
+            # Add to Supabase
+            add_documents_to_supabase(
+                supabase_client, 
+                urls, 
+                chunk_numbers, 
+                contents, 
+                metadatas, 
+                url_to_full_document
+            )
+            
             return json.dumps({
-                "success": False,
-                "file_path": file_path,
-                "error": "Only .md files are supported"
+                "success": True,
+                "file_path": filename,
+                "chunks_processed": len(chunks),
+                "source_name": source_name
             }, indent=2)
-
-        content = process_markdown_file(file_path)
-        if not content or not content.strip():
-            return json.dumps({
-                "success": False,
-                "file_path": file_path,
-                "error": "File is empty or could not be read"
-            }, indent=2)
-
-        abs_path = os.path.abspath(file_path)
-        normalized_abs_path = abs_path.replace('\\', '/')
-        file_url = f"file://{normalized_abs_path}"
-        filename = os.path.basename(abs_path)
-        source_name = os.path.splitext(filename)[0]
-
-        markdown_chunks = smart_chunk_markdown(content, chunk_size=chunk_size)
-
-        final_chunks_to_store: List[str] = []
-        final_metadatas_to_store: List[Dict[str, Any]] = []
-        url_to_full_document_map: Dict[str, str] = {file_url: content}
-
-        for i, chunk_md in enumerate(markdown_chunks):
-            meta = extract_section_info(chunk_md)
-            meta.update({
-                'chunk_index': i,
-                'source': source_name,
-                'filename': filename,
-                'doc_type': 'markdown',        # Explicitly 'markdown' for local files
-                'local_file': True,
-                'file_path': normalized_abs_path,
-                'crawl_type': 'local_markdown_tool', # To distinguish if needed
-                'url': file_url
-            })
-            final_chunks_to_store.append(chunk_md)
-            final_metadatas_to_store.append(meta)
-
-        if not final_chunks_to_store:
-            return json.dumps({
-                "success": False,
-                "file_path": file_path,
-                "error": "No content chunks generated from file"
-            }, indent=2)
-
-        doc_urls_for_supabase = [meta['url'] for meta in final_metadatas_to_store]
-        chunk_indices_for_supabase = [meta['chunk_index'] for meta in final_metadatas_to_store]
-
-        add_documents_to_supabase(
-            supabase_client,
+            
+        finally:
+            # Clean up the temporary file if it exists
+            if 'temp_path' in locals():
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+    
             doc_urls_for_supabase,
             chunk_indices_for_supabase,
             final_chunks_to_store,
