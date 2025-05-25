@@ -131,7 +131,18 @@ SUPABASE_SERVICE_KEY=your_supabase_service_key
 ### Using Docker
 
 ```bash
-docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
+# Run with a specific container name to reuse the same container
+docker run --name crawl4ai-mcp --env-file .env -p 8051:8051 mcp/crawl4ai-rag
+```
+
+To stop the container:
+```bash
+docker stop crawl4ai-mcp
+```
+
+To start the existing container again:
+```bash
+docker start crawl4ai-mcp
 ```
 
 ### Using Python

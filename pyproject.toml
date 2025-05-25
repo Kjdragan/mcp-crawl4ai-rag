@@ -5,9 +5,21 @@ description = "MCP server for integrating web crawling and RAG into AI agents an
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "crawl4ai",            # Fetch latest version
+    "crawl4ai", # Fetch latest version
     "mcp",
     "supabase",
     "openai",
-    "dotenv"
+    "python-dotenv>=1.0.0",
+    "google-adk>=1.0.0",
+    "google-genai>=1.16.1",  # Unified Google Gemini SDK (replaces google-generativeai)
+    "google-cloud-aiplatform>=1.94.0",
+    "google-api-core>=2.24.2",
+    "google-auth>=2.40.2",
+    "googleapis-common-protos>=1.70.0",
+]
+
+[dependency-groups]
+dev = [
+    # Development-only dependencies can be added here
+    # For example: testing, linting, or documentation tools
 ]
