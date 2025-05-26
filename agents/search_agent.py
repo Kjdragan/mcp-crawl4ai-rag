@@ -1,24 +1,16 @@
-"""
-Google ADK Search Agent
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-This agent uses Google ADK to implement a search agent with web search capabilities.
-It can be run using ADK web interface.
+"""
+Search Agent using Google ADK with Gemini 2.5 Pro on Vertex AI
 """
 
 import os
 from typing import Dict, Any, List
 from pathlib import Path
-
-# Google ADK imports - correct imports for the latest version
-from google.adk.agents import Agent
-from google.adk.tools import FunctionTool
-from google.adk.tools import google_search
-from google.adk.models import VertexAIModel
-
-# Environment variables
-import os
-from pathlib import Path
 from dotenv import load_dotenv
+from google.adk.agents import LlmAgent
+from google.adk.tools import google_search
 
 # Get the project root directory
 project_root = Path(__file__).parent.parent.absolute()
@@ -30,97 +22,46 @@ print(f"Loading environment variables from: {dotenv_path}")
 
 # Get environment variables
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
-VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
-VERTEX_MODEL_NAME = os.getenv("VERTEX_MODEL_NAME", "gemini-2.5-pro-preview-05-06")
-
-
-def summarize_search_results(query: str, results: List[Dict[str, Any]]) -> str:
-    """
-    Summarize search results into a readable format.
-    
-    Args:
-        query: The search query
-        results: List of search result dictionaries
-        
-    Returns:
-        Formatted summary of search results
-    """
-    summary = f"Search results for: '{query}'\n\n"
-    
-    for i, result in enumerate(results, 1):
-        title = result.get("title", "No title")
-        url = result.get("url", "No URL")
-        snippet = result.get("snippet", "No description available")
-        
-        summary += f"{i}. {title}\n"
-        summary += f"   URL: {url}\n"
-        summary += f"   Summary: {snippet}\n\n"
-    
-    return summary
-
-
-def get_vertex_model_info() -> str:
-    """
-    Get information about the Vertex AI model being used.
-    
-    Returns:
-        Information about the Vertex AI model
-    """
-    return f"Using Vertex AI model: {VERTEX_MODEL_NAME} in {VERTEX_LOCATION} region"
+# Model ID to be used by the LlmAgent, read from VERTEX_AI_MODEL_NAME in .env
+AGENT_MODEL_ID_FROM_ENV = os.getenv("VERTEX_AI_MODEL_NAME", "gemini-1.5-flash-001") # Default if not set
+# GOOGLE_CLOUD_PROJECT_ID and GOOGLE_CLOUD_REGION will be read by ADK from os.environ
 
 
 # Create the search agent
-def create_search_agent():
+def create_search_agent() -> LlmAgent:
     """
-    Create and configure the search agent with web search capabilities.
-    
+    Create a search agent using Google ADK with Gemini 2.5 Pro on Vertex AI
+
     Returns:
-        Configured Agent instance
+        Agent: A Google ADK Agent configured with search capabilities
     """
-    # Configure the Google Search tool
-    search_tool = google_search.GoogleSearch()
-    
-    # Create a tool to summarize search results
-    summarize_tool = FunctionTool(
-        name="summarize_search_results",
-        description="Summarize search results into a readable format",
-        function=summarize_search_results
-    )
-    
-    # Create a tool to get model information
-    model_info_tool = FunctionTool(
-        name="get_vertex_model_info",
-        description="Get information about the Vertex AI model being used",
-        function=get_vertex_model_info
-    )
-    
     # Create the agent with the search tools
-    agent = Agent(
-        name="search_agent",
-        description="An agent that can search the web and summarize results using Gemini 2.5 Pro on Vertex AI",
-        model=VertexAIModel(
-            project_id=GOOGLE_CLOUD_PROJECT,
-            location=VERTEX_LOCATION,
-            model_name=VERTEX_MODEL_NAME
+    # ADK will use GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION from env
+    agent = LlmAgent(
+        model=AGENT_MODEL_ID_FROM_ENV, # Pass model name as string
+        tools=[
+            google_search
+        ],
+        instruction=(
+            "You are a helpful search agent. When asked a question, the Google Search tool will be automatically invoked by the model to find relevant information. "
+            "Present the findings in a clear and concise way. Always cite your sources with links if provided by the search tool. "
+            "If the user asks about your capabilities, explain that you can search the web using Google Search and provide summarized information with source citations. "
+            "For complex queries, the model will break them down into specific search terms to get the most relevant results."
         ),
-        tools=[search_tool, summarize_tool, model_info_tool],
-        instruction="""
-        You are a helpful search assistant that can find information on the web.
-        
-        When a user asks a question:
-        1. Use the google_search tool to find relevant information
-        2. Use the summarize_search_results tool to format the results nicely
-        3. Provide a concise answer based on the search results
-        4. Always cite your sources with links
-        
-        If the search doesn't return useful results, acknowledge this and suggest 
-        alternative search terms or approaches.
-        """
+        name="search_agent",
+        description="An agent that can search the web and summarize results using Gemini models with built-in Google Search."
     )
-    
+
     return agent
 
 
-# Create the agent instance
-search_agent = create_search_agent()
+# Create the agent instance with the name 'root_agent'
+# This is the standard name ADK looks for when discovering agents
+root_agent = create_search_agent()
+
+# This is required for ADK to discover the agent when run directly
+if __name__ == "__main__":
+    print("Search agent initialized and ready to use.")
+    print(f"  Model ID (from VERTEX_AI_MODEL_NAME in .env): {AGENT_MODEL_ID_FROM_ENV}")
+    # ADK will attempt to use GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION from environment if GOOGLE_GENAI_USE_VERTEXAI is TRUE
+    print(f"  Relevant env vars for Vertex: GOOGLE_GENAI_USE_VERTEXAI='{os.getenv('GOOGLE_GENAI_USE_VERTEXAI')}', GOOGLE_CLOUD_PROJECT='{os.getenv('GOOGLE_CLOUD_PROJECT')}', GOOGLE_CLOUD_LOCATION='{os.getenv('GOOGLE_CLOUD_LOCATION')}'")
